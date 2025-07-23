@@ -58,6 +58,16 @@ import os
 import re
 import gc
 
+import openvino_genai
+# https://github.com/openvinotoolkit/openvino.genai
+WHISPER_OV_MODEL = '/home/eapet/ws/downloads/breeze-asr-25' #https://github.com/mtkresearch/Breeze-ASR-25
+#WHISPER_OV_MODEL = '/home/eapet/ws/downloads/whisper-base' # Run optimum-cli export openvino --model openai/whisper-base home/eapet/ws/downloads/whisper-base
+#WHISPER_OV_MODEL = '/home/eapet/ws/downloads/whisper-small'
+#WHISPER_OV_MODEL = '/home/eapet/ws/downloads/whisper-medium'
+ov_pipe = None
+ov_config = None
+ov_device = 'GPU'
+
 # Named logger for this module.
 logger = logging.getLogger("realtimestt")
 logger.propagate = False
@@ -161,6 +171,18 @@ class TranscriptionWorker:
             warmup_audio_data, _ = sf.read(warmup_audio_path, dtype="float32")
             segments, info = model.transcribe(warmup_audio_data, language="en", beam_size=1)
             model_warmup_transcription = " ".join(segment.text for segment in segments)
+
+            print(f"*********** RealtimeSTT OV GENAI WarmUp ***************")
+            global ov_pipe, ov_config
+            ov_pipe = openvino_genai.WhisperPipeline(WHISPER_OV_MODEL, ov_device)
+            ov_config = ov_pipe.get_generation_config()
+            ov_config.language = "<|zh|>"
+            ov_config.task = "transcribe"
+            result = ov_pipe.generate(warmup_audio_data, ov_config)
+
+            if result.texts:
+                for text in result.texts:
+                    print(f"RealtimeSTT OV GenAI *** {text=} ***")
         except Exception as e:
             logging.exception(f"Error initializing main faster_whisper transcription model: {e}")
             raise
@@ -218,6 +240,17 @@ class TranscriptionWorker:
                         transcription = " ".join(seg.text for seg in segments).strip()
                         logging.debug(f"Final text detected with main model: {transcription} in {elapsed:.4f}s")
                         self.conn.send(('success', (transcription, info)))
+                        
+                        #global ov_pipe, ov_config
+                        #config = ov_pipe.get_generation_config()
+                        #config.language = "<|zh|>"
+                        #config.task = "transcribe"
+                        #result = self.ov_pipe.generate(audio_array, config)
+
+                        #if result.chunks:
+                        #        for chunk in result.chunks:
+                        #            print(f"==== {chunk.text=} ====")
+                        #print(f"OV GenAI === {transcription} ===")
                     except Exception as e:
                         logging.error(f"General error in transcription: {e}", exc_info=True)
                         self.conn.send(('error', str(e)))
@@ -2396,32 +2429,50 @@ class AudioToTextRecorder:
                                 if peak > 0:
                                     audio_array = (audio_array / peak) * 0.95
 
-                        if self.realtime_batch_size > 0:
-                            segments, info = self.realtime_model_type.transcribe(
-                                audio_array,
-                                language=self.language if self.language else None,
-                                beam_size=self.beam_size_realtime,
-                                initial_prompt=self.initial_prompt_realtime,
-                                suppress_tokens=self.suppress_tokens,
-                                batch_size=self.realtime_batch_size,
-                                vad_filter=self.faster_whisper_vad_filter
-                            )
-                        else:
-                            segments, info = self.realtime_model_type.transcribe(
-                                audio_array,
-                                language=self.language if self.language else None,
-                                beam_size=self.beam_size_realtime,
-                                initial_prompt=self.initial_prompt_realtime,
-                                suppress_tokens=self.suppress_tokens,
-                                vad_filter=self.faster_whisper_vad_filter
-                            )
+                        global ov_pipe, ov_config
+                        #ov_config = ov_pipe.get_generation_config()
+                        #ov_config.language = "<|zh|>"
+                        #ov_config.task = "transcribe"
+                        result = ov_pipe.generate(audio_array.tolist(), ov_config, initial_prompt="天空是藍色的。當天空……她走回家。因為他……今天是晴天。要是我……就好了。")
 
-                        self.detected_realtime_language = info.language if info.language_probability > 0 else None
-                        self.detected_realtime_language_probability = info.language_probability
+                        if result.texts:
+                            for text in result.texts:
+                                print(f"**** realtime : {text=} ****")
+                        else:
+                            print(f"**** realtime : {result=} ****")
+
+                        ##if self.realtime_batch_size > 0:
+                        ##    segments, info = self.realtime_model_type.transcribe(
+                        ##        audio_array,
+                        ##        language=self.language if self.language else None,
+                        ##        beam_size=self.beam_size_realtime,
+                        ##        initial_prompt=self.initial_prompt_realtime,
+                        ##        suppress_tokens=self.suppress_tokens,
+                        ##        batch_size=self.realtime_batch_size,
+                        ##        vad_filter=self.faster_whisper_vad_filter
+                        ##    )
+                        ##else:
+                        ##    segments, info = self.realtime_model_type.transcribe(
+                        ##        audio_array,
+                        ##        language=self.language if self.language else None,
+                        ##        beam_size=self.beam_size_realtime,
+                        ##        initial_prompt=self.initial_prompt_realtime,
+                        ##        suppress_tokens=self.suppress_tokens,
+                        ##        vad_filter=self.faster_whisper_vad_filter
+                        ##    )
+
+                        self.detected_realtime_language = 'zh' #info.language if info.language_probability > 0 else None
+                        self.detected_realtime_language_probability = 1 #info.language_probability
+                        ##realtime_text = " ".join(
+                        ##    seg.text for seg in segments
+                        ##)
                         realtime_text = " ".join(
-                            seg.text for seg in segments
-                        )
+                                text for text in result.texts
+                                )
                         logger.debug(f"Realtime text detected: {realtime_text}")
+                        #print(f"*** RealtiimeSTT text detected: {info.language_probability} ***")
+                        #print(f"*** RealtiimeSTT text detected: {info.language} ***")
+                        #print(f"*** RealtiimeSTT text detected: {realtime_text} ***")
 
                     # double check recording state
                     # because it could have changed mid-transcription
